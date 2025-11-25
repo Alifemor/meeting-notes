@@ -20,6 +20,142 @@ class ProcessingError(Exception):
     pass
 
 
+# --------- helpers for resolving paths ---------
+
+
+def _search_in_bases(rel: Path) -> Path | None:
+    """
+    Ищем относительный путь в типичных базовых каталогах:
+    - PROJECT_ROOT (dev или dist/MeetingNotes)
+    - PROJECT_ROOT/_internal (PyInstaller 6+)
+    - текущая рабочая директория
+    """
+    bases = [
+        PROJECT_ROOT,
+        PROJECT_ROOT / "_internal",
+        Path.cwd(),
+    ]
+    for base in bases:
+        candidate = base / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def resolve_whisper_model_path(model: str | None) -> Path:
+    """
+    Резолвит путь к модели Whisper:
+
+    - поддерживает абсолютные пути;
+    - пути относительно PROJECT_ROOT / PROJECT_ROOT/_internal / CWD;
+    - 'ggml-small.bin' -> ищем в models/, _internal/models/;
+    - если путь пустой/битый — используем дефолт:
+      prompts/models/ggml-small.bin или первую .bin в models.
+    """
+    name = (model or "").strip()
+    candidates: list[Path] = []
+
+    if name and name.lower() not in ("default", "none"):
+        raw = Path(name)
+
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            # как есть: models/ggml-small.bin, bin/что-нибудь и т.п.
+            c = _search_in_bases(raw)
+            if c:
+                candidates.append(c)
+
+            # если указано только имя файла — пробуем models/<name>
+            if not raw.parent:
+                for base in (PROJECT_ROOT, PROJECT_ROOT / "_internal"):
+                    candidates.append(base / "models" / raw.name)
+
+    # дефолты — на случай пустого/битого пути
+    for base in (PROJECT_ROOT, PROJECT_ROOT / "_internal"):
+        models_dir = base / "models"
+        if models_dir.is_dir():
+            default = models_dir / "ggml-small.bin"
+            if default.is_file():
+                candidates.append(default)
+            else:
+                # первая попавшаяся .bin
+                for f in sorted(models_dir.glob("*.bin")):
+                    candidates.append(f)
+                    break
+
+    # выбираем первый существующий
+    seen: set[Path] = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        if c.is_file():
+            return c
+
+    raise ProcessingError(
+        "Файл модели Whisper не найден. "
+        "Проверьте настройки 'whisper_model' и содержимое папки models."
+    )
+
+
+def resolve_prompt_path(prompt: str | None) -> Path:
+    """
+    Резолвит путь к prompt-файлу.
+
+    Если путь пустой/битый — используем дефолт:
+    prompts/summary_default.txt (в PROJECT_ROOT или _internal).
+    """
+    name = (prompt or "").strip()
+    candidates: list[Path] = []
+
+    if name and name.lower() not in ("default", "none"):
+        raw = Path(name)
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            c = _search_in_bases(raw)
+            if c:
+                candidates.append(c)
+
+    # дефолтный prompt
+    default_rel = Path("prompts") / "summary_default.txt"
+    for base in (PROJECT_ROOT, PROJECT_ROOT / "_internal"):
+        candidates.append(base / default_rel)
+
+    for c in candidates:
+        if c.is_file():
+            return c
+
+    raise ProcessingError(
+        "Prompt-файл для summary не найден. "
+        "Проверьте настройку 'summary_prompt' и наличие prompts/summary_default.txt."
+    )
+
+
+def resolve_whisper_binary_path(path: str | None) -> str:
+    """
+    Резолвит путь к whisper-cli:
+
+    - учитывает PROJECT_ROOT / _internal / CWD;
+    - если не нашли, возвращаем исходную строку (вдруг он в PATH).
+    """
+    name = (path or "").strip()
+    if not name:
+        name = "bin/whisper-cli.exe"  # разумный дефолт для нашего проекта
+
+    raw = Path(name)
+    if raw.is_absolute() and raw.is_file():
+        return str(raw)
+
+    c = _search_in_bases(raw)
+    if c:
+        return str(c)
+
+    # не нашли — пусть subprocess попробует через PATH
+    return name
+
+
 def _unique_path(base_path: Path) -> Path:
     """
     Если файл существует — добавляем суффикс (1), (2), ...
@@ -103,14 +239,14 @@ def process_video(
     settings = load_settings()
 
     ffmpeg_path = settings["ffmpeg_path"]
-    whisper_path = settings["whisper_path"]
-    whisper_model = settings["whisper_model"]
+    whisper_path_raw = settings["whisper_path"]
+    whisper_model_raw = settings.get("whisper_model", "models/ggml-small.bin")
     temp_dir_setting = settings.get("temp_dir")
 
     openrouter_api_key = settings.get("openrouter_api_key")
     openrouter_model = settings.get("openrouter_model", "openai/gpt-4.1-mini")
     summary_max_tokens = int(settings.get("summary_max_tokens", 1024))
-    summary_prompt_path = settings.get("summary_prompt")
+    summary_prompt_raw = settings.get("summary_prompt")
 
     long_threshold_words = int(settings.get("chunk_threshold_words", 4000))
     max_words_per_chunk = int(settings.get("chunk_max_words", 3500))
@@ -121,14 +257,26 @@ def process_video(
     if fmt not in ("md", "txt"):
         fmt = "md"
 
+    # Резолвим реальные пути
+    whisper_path = resolve_whisper_binary_path(whisper_path_raw)
+    model_path = resolve_whisper_model_path(whisper_model_raw)
+    prompt_path = resolve_prompt_path(summary_prompt_raw)
+
     logger.info(
-        "Settings: whisper_model=%s, whisper_path=%s, ffmpeg_path=%s, llm_model=%s, "
-        "chunk_threshold=%s, chunk_size=%s, overlap=%s, summary_format=%s",
-        whisper_model, whisper_path, ffmpeg_path, openrouter_model,
-        long_threshold_words, max_words_per_chunk, overlap_words, fmt
+        "Settings:"
+        " whisper_model_raw=%s, model_path=%s,"
+        " whisper_path_raw=%s, whisper_path_resolved=%s,"
+        " ffmpeg_path=%s, llm_model=%s,"
+        " chunk_threshold=%s, chunk_size=%s, overlap=%s,"
+        " summary_format=%s, prompt_path=%s",
+        whisper_model_raw, model_path,
+        whisper_path_raw, whisper_path,
+        ffmpeg_path, openrouter_model,
+        long_threshold_words, max_words_per_chunk, overlap_words,
+        fmt, prompt_path,
     )
 
-    # TEMP DIR
+    # TEMP DIR (с поддержкой temp_dir из настроек)
     if temp_dir_setting:
         temp_root = Path(temp_dir_setting)
         temp_root.mkdir(parents=True, exist_ok=True)
@@ -136,15 +284,6 @@ def process_video(
         temp_dir.mkdir(parents=True, exist_ok=True)
     else:
         temp_dir = Path(tempfile.mkdtemp(prefix="meeting_notes_"))
-
-    # Whisper model path
-    model_path = Path(whisper_model)
-    if not model_path.is_file():
-        candidate = PROJECT_ROOT / "models" / whisper_model
-        if candidate.is_file():
-            model_path = candidate
-        else:
-            raise ProcessingError(f"Файл модели Whisper не найден: {whisper_model}.")
 
     try:
         media_path = video_path
@@ -212,7 +351,7 @@ def process_video(
                     api_key=openrouter_api_key,
                     model=openrouter_model,
                     max_tokens=summary_max_tokens,
-                    prompt_path=summary_prompt_path,
+                    prompt_path=str(prompt_path),
                     max_words_per_chunk=max_words_per_chunk,
                     overlap_words=overlap_words,
                 )
@@ -226,7 +365,7 @@ def process_video(
                     api_key=openrouter_api_key,
                     model=openrouter_model,
                     max_tokens=summary_max_tokens,
-                    prompt_path=summary_prompt_path,
+                    prompt_path=str(prompt_path),
                 )
 
             logger.info("Summary generated in %.2fs", time.time() - t_sum)

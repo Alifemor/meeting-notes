@@ -10,6 +10,7 @@ import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from src.version import __version__ as APP_VERSION
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -303,6 +304,7 @@ class MeetingNotesGUI(ttk.Window):
         self._set_app_icon()
         self._build_ui()
         self._apply_i18n()
+        self._set_controls_running(False)
         self.status_var.set(self._t("status_idle"))
         self._update_summary_dependent_ui()
 
@@ -422,7 +424,6 @@ class MeetingNotesGUI(ttk.Window):
         )
 
     # ---------------- entry shortcuts + context menu ----------------
-
 
     def _bind_entry_shortcuts(self, entry: tk.Entry):
         """
@@ -769,7 +770,9 @@ class MeetingNotesGUI(ttk.Window):
         self.whisper_lbl = ttk.Label(row1, text="")
         self.whisper_lbl.pack(side=LEFT)
 
-        ttk.Entry(row1, textvariable=self.whisper_model_var, width=35).pack(side=LEFT, padx=6)
+        self.whisper_entry = ttk.Entry(row1, textvariable=self.whisper_model_var, width=35)
+        self.whisper_entry.pack(side=LEFT, padx=6)
+        self._bind_entry_shortcuts(self.whisper_entry)
 
         self.whisper_browse_btn = ttk.Button(row1, text="", command=self.on_browse_whisper_model)
         self.whisper_browse_btn.pack(side=LEFT)
@@ -786,21 +789,30 @@ class MeetingNotesGUI(ttk.Window):
 
         self.llm_lbl = ttk.Label(row2, text="")
         self.llm_lbl.pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.llm_model_var, width=35).pack(side=LEFT, padx=6)
+
+        self.llm_entry = ttk.Entry(row2, textvariable=self.llm_model_var, width=35)
+        self.llm_entry.pack(side=LEFT, padx=6)
+        self._bind_entry_shortcuts(self.llm_entry)
 
         row3 = ttk.Frame(self.adv_frame)
         row3.pack(fill=X, pady=2)
 
         self.max_tokens_lbl = ttk.Label(row3, text="")
         self.max_tokens_lbl.pack(side=LEFT)
-        ttk.Spinbox(row3, from_=128, to=4096, textvariable=self.max_tokens_var, width=10).pack(side=LEFT, padx=6)
+        self.max_tokens_spin = ttk.Spinbox(
+            row3, from_=128, to=4096, textvariable=self.max_tokens_var, width=10
+        )
+        self.max_tokens_spin.pack(side=LEFT, padx=6)
 
         row4 = ttk.Frame(self.adv_frame)
         row4.pack(fill=X, pady=2)
 
         self.prompt_lbl = ttk.Label(row4, text="")
         self.prompt_lbl.pack(side=LEFT)
-        ttk.Entry(row4, textvariable=self.prompt_path_var, width=35).pack(side=LEFT, padx=6)
+
+        self.prompt_entry = ttk.Entry(row4, textvariable=self.prompt_path_var, width=35)
+        self.prompt_entry.pack(side=LEFT, padx=6)
+        self._bind_entry_shortcuts(self.prompt_entry)
 
         self.prompt_browse_btn = ttk.Button(row4, text="", command=self.on_browse_prompt)
         self.prompt_browse_btn.pack(side=LEFT)
@@ -825,19 +837,28 @@ class MeetingNotesGUI(ttk.Window):
         r5.pack(fill=X, pady=2)
         self.threshold_lbl = ttk.Label(r5, text="")
         self.threshold_lbl.pack(side=LEFT)
-        ttk.Spinbox(r5, from_=1000, to=30000, textvariable=self.chunk_threshold_var, width=10).pack(side=LEFT, padx=6)
+        self.threshold_spin = ttk.Spinbox(
+            r5, from_=1000, to=30000, textvariable=self.chunk_threshold_var, width=10
+        )
+        self.threshold_spin.pack(side=LEFT, padx=6)
 
         r6 = ttk.Frame(self.chunk_box)
         r6.pack(fill=X, pady=2)
         self.chunk_size_lbl = ttk.Label(r6, text="")
         self.chunk_size_lbl.pack(side=LEFT)
-        ttk.Spinbox(r6, from_=1000, to=10000, textvariable=self.chunk_size_var, width=10).pack(side=LEFT, padx=6)
+        self.chunk_size_spin = ttk.Spinbox(
+            r6, from_=1000, to=10000, textvariable=self.chunk_size_var, width=10
+        )
+        self.chunk_size_spin.pack(side=LEFT, padx=6)
 
         r7 = ttk.Frame(self.chunk_box)
         r7.pack(fill=X, pady=2)
         self.overlap_lbl = ttk.Label(r7, text="")
         self.overlap_lbl.pack(side=LEFT)
-        ttk.Spinbox(r7, from_=0, to=2000, textvariable=self.chunk_overlap_var, width=10).pack(side=LEFT, padx=6)
+        self.overlap_spin = ttk.Spinbox(
+            r7, from_=0, to=2000, textvariable=self.chunk_overlap_var, width=10
+        )
+        self.overlap_spin.pack(side=LEFT, padx=6)
 
         # Sizegrip для ресайза
         if self._use_custom_titlebar:
@@ -901,9 +922,12 @@ class MeetingNotesGUI(ttk.Window):
             self.summary_format_combo.set(self._t("summary_format_md"))
 
     def _apply_i18n(self):
-        self.title(self._t("title"))
+        full_title = f"{self._t('title')} v{APP_VERSION}"
+
+        self.title(full_title)
+
         if getattr(self, "_use_custom_titlebar", False):
-            self.title_lbl.config(text=self._t("title"))
+            self.title_lbl.config(text=full_title)
 
         self.ui_lang_lbl.config(text=self._t("ui_lang"))
         self.file_frame.config(text=self._t("input_file"))
@@ -957,6 +981,75 @@ class MeetingNotesGUI(ttk.Window):
 
         if not self.is_running:
             self.status_var.set(self._t("status_idle"))
+
+    # ---------------- enable/disable controls when running ----------------
+
+    def _set_controls_running(self, running: bool):
+        """
+        Лочим/разлочиваем элементы управления во время обработки.
+        Пока идёт пайплайн — пользователь не может менять настройки,
+        выбирать файл и жать лишние кнопки. Доступна только Cancel.
+        """
+        if running:
+            main_state = DISABLED
+            adv_state = DISABLED
+            combo_state = "disabled"
+        else:
+            main_state = NORMAL
+            adv_state = NORMAL
+            combo_state = "readonly"
+
+        # верх: язык UI
+        self.ui_lang_combo.config(state=combo_state)
+
+        # файл
+        self.file_entry.config(state=main_state)
+        self.browse_btn.config(state=main_state)
+
+        # выходы
+        self.summary_cb.config(state=main_state)
+        self.transcript_cb.config(state=main_state)
+
+        # API / summary
+        self.api_key_entry.config(state=main_state)
+        self.api_key_toggle_btn.config(state=main_state)
+        self.test_llm_btn.config(state=main_state)
+
+        self.summary_format_combo.config(state=combo_state)
+
+        # язык транскрипции
+        self.lang_combo.config(state=combo_state)
+
+        # кнопки
+        self.start_btn.config(state=DISABLED if running else NORMAL)
+        self.cancel_btn.config(state=NORMAL if running else DISABLED)
+        if running:
+            # Открытие папки неактивно во время обработки
+            self.open_folder_btn.config(state=DISABLED)
+
+        # переключатель advanced
+        self.adv_toggle.config(state=main_state)
+
+        # advanced-поля
+        self.whisper_entry.config(state=adv_state)
+        self.whisper_browse_btn.config(state=adv_state)
+        self.models_open_btn.config(state=adv_state)
+
+        self.llm_entry.config(state=adv_state)
+
+        self.prompt_entry.config(state=adv_state)
+        self.prompt_browse_btn.config(state=adv_state)
+        self.prompt_edit_btn.config(state=adv_state)
+
+        # спинбоксы
+        try:
+            self.max_tokens_spin.config(state=adv_state)
+            self.threshold_spin.config(state=adv_state)
+            self.chunk_size_spin.config(state=adv_state)
+            self.overlap_spin.config(state=adv_state)
+        except Exception:
+            # На случай, если что-то не инициализировалось — не падаем.
+            pass
 
     # ---------------- summary-dependent visibility ----------------
 
@@ -1073,8 +1166,11 @@ class MeetingNotesGUI(ttk.Window):
         self._stop_timer()
         self.elapsed_row.pack_forget()
 
+        self.progress_var.set(0)
+        self.progress_bar.stop()
+        self._set_controls_running(False)
+
     def on_test_llm(self):
-        # Перед тестом сохраняем текущие настройки
         try:
             self._persist_settings()
         except Exception:
@@ -1091,7 +1187,7 @@ class MeetingNotesGUI(ttk.Window):
         self.status_var.set(self._t("status_testing_llm"))
 
         def worker():
-            try:                
+            try:
                 from src.summarizer import call_openrouter_chat
 
                 ui_lang = self.ui_lang_var.get()
@@ -1139,7 +1235,6 @@ class MeetingNotesGUI(ttk.Window):
 
         threading.Thread(target=worker, daemon=True).start()
 
-
     def on_start(self):
         media = self.file_path.get().strip()
         if not media:
@@ -1166,6 +1261,9 @@ class MeetingNotesGUI(ttk.Window):
         self._start_timer()
         self.elapsed_row.pack(fill=X, pady=(4, 0))
 
+        # Лочим все настройки до окончания обработки
+        self._set_controls_running(True)
+
         def progress_cb(stage: str, percent: int, message: str):
             self._last_stage = stage
             self.after(0, lambda: self._update_progress(percent, message or stage))
@@ -1173,7 +1271,7 @@ class MeetingNotesGUI(ttk.Window):
         reporter = ProgressReporter(progress_cb)
 
         def worker():
-            try:                
+            try:
                 from src.pipeline import process_video, ProcessingError
 
                 lang = None if self.lang_var.get() == "auto" else self.lang_var.get()
@@ -1197,7 +1295,6 @@ class MeetingNotesGUI(ttk.Window):
             except Exception as e:
                 msg = f"Unexpected error: {e}\n{traceback.format_exc()}"
                 self.after(0, lambda m=msg: self._on_error(m))
-
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1290,6 +1387,7 @@ class MeetingNotesGUI(ttk.Window):
         self._stop_pseudo_progress()
         self._stop_timer()
         self.elapsed_row.pack_forget()
+        self._set_controls_running(False)
         messagebox.showinfo(self._t("done_title"), self._t("done_msg").format(path=result_path))
 
     def _on_error(self, msg: str):
@@ -1302,6 +1400,7 @@ class MeetingNotesGUI(ttk.Window):
         self._stop_pseudo_progress()
         self._stop_timer()
         self.elapsed_row.pack_forget()
+        self._set_controls_running(False)
         messagebox.showerror(self._t("error_title"), msg)
 
     # ---------------- settings persistence ----------------
