@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+
+# бинарники моделей whisper и ffmpeg + файлы для теста
+bin/
+models/
+*.exe
+*.dll
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wav
+
+# сборки, логи, кеш
+dist/
+build/
+logs/
+.pytest_cache/
+.git/
+
+# конфиг с ключом
+settings.json
+settings_user.json
+
+# файлы отладки
+run_meeting_notes.py
+build.ps1

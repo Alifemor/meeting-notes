@@ -1,0 +1,11 @@
+{
+  "ffmpeg_path": "ffmpeg",
+  "whisper_path": "bin/whisper-cli.exe",
+  "whisper_model": "ggml-base.bin",
+  "openai_api_key": "sk-...",
+  "openai_model": "gpt-4.1-mini",
+  "summary_max_tokens": 1024,
+  "chunk_threshold_words": 4000,
+  "chunk_max_words": 3500,
+  "chunk_overlap_words": 200
+}
