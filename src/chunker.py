@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import List
 from threading import Event
+import unicodedata
 
 from .summarizer import (
     generate_llm_summary_markdown,
@@ -10,15 +11,29 @@ from .summarizer import (
 )
 
 
+# ---------------- errors ----------------
+
 class ChunkingError(Exception):
     """Ошибка, связанная с разбиением и сборкой чанков."""
     pass
+
+
+# ---------------- helpers ----------------
+
+def _norm_text(text: str) -> str:
+    """
+    Unicode-normalization NFC для текстов.
+    Предотвращает скрытые баги на CJK-символах.
+    """
+    return unicodedata.normalize("NFC", text or "")
 
 
 def _check_cancel(cancel_event: Event | None):
     if cancel_event and cancel_event.is_set():
         raise ChunkingError("Отменено пользователем.")
 
+
+# ---------------- chunk splitter ----------------
 
 def split_text_into_chunks(
     text: str,
@@ -27,14 +42,15 @@ def split_text_into_chunks(
     min_last_chunk_ratio: float = 0.3,
 ) -> List[str]:
     """
-    Разбивает текст на чанки по max_words слов с перекрытием overlap_words.
+    Разбивает текст на чанки с перекрытием.
+    Гарантировано покрывает ВСЁ содержимое текста.
 
-    Гарантии:
-    - покрываем ВСЮ последовательность слов без дыр;
-    - перекрытие реализовано за счёт шага < max_words;
-    - если последний чанк слишком маленький (по min_last_chunk_ratio),
-      он приклеивается к предыдущему, чтобы не получать микрочанк.
+    Логика:
+    - шаг = max_words - overlap_words
+    - последний слишком маленький чанк приклеивается к предыдущему
     """
+
+    text = _norm_text(text)
     words = text.split()
     n = len(words)
 
@@ -44,7 +60,6 @@ def split_text_into_chunks(
     if n <= max_words:
         return [text]
 
-    # корректируем параметры
     if max_words <= 0:
         raise ChunkingError("max_words должен быть > 0")
 
@@ -53,9 +68,10 @@ def split_text_into_chunks(
     if step <= 0:
         step = max_words
 
-    # сначала считаем индексы (start, end), чтобы не было дыр
     ranges: list[tuple[int, int]] = []
     start = 0
+
+    # покрываем текст вперед без дыр
     while start < n:
         end = min(start + max_words, n)
         ranges.append((start, end))
@@ -63,25 +79,26 @@ def split_text_into_chunks(
             break
         start += step
 
-    # если последний чанк слишком маленький — сливаем его с предыдущим
+    # если хвост слишком мал — приклеиваем
     if len(ranges) >= 2:
         last_start, last_end = ranges[-1]
-        prev_start, prev_end = ranges[-2]
         last_len = last_end - last_start
 
         if last_len < int(max_words * min_last_chunk_ratio):
-            # расширяем предпоследний чанк до конца текста
+            prev_start, prev_end = ranges[-2]
             ranges[-2] = (prev_start, last_end)
             ranges.pop()
 
-    # собираем текстовые чанки
+    # финальная сборка чанков
     chunks: List[str] = []
-    for start, end in ranges:
-        chunk_words = words[start:end]
-        chunks.append(" ".join(chunk_words))
+    for s, e in ranges:
+        chunk = " ".join(words[s:e])
+        chunks.append(chunk)
 
     return chunks
 
+
+# ---------------- summarizing with chunking ----------------
 
 def summarize_transcript_with_chunking(
     transcript_text: str,
@@ -95,14 +112,14 @@ def summarize_transcript_with_chunking(
     cancel_event: Event | None = None,
 ) -> str:
     """
-    Делает многошаговое резюме длинной транскрипции:
-    1) Делит текст на чанки по max_words_per_chunk слов (с перекрытием).
-    2) Для каждого чанка делает мини-summary.
-    3) Объединяет мини-summary в финальное summary.
+    Многошаговое резюме длинного транскрипта:
 
-    Весь исходный текст гарантированно попадает либо в один чанк,
-    либо в совокупность чанков (без дыр и потерь хвоста).
+    1) Чанкинг без потерь
+    2) Mini-summary по каждому чанку
+    3) Итоговое summary, объединяющее все части
     """
+
+    transcript_text = _norm_text(transcript_text)
     _check_cancel(cancel_event)
 
     try:
@@ -114,7 +131,7 @@ def summarize_transcript_with_chunking(
     except Exception as e:
         raise ChunkingError(f"Ошибка разбиения текста на чанки: {e}")
 
-    # Если получился один чанк — идём по обычному пути без усложнений
+    # один чанк — генерируем напрямую
     if len(chunks) == 1:
         return generate_llm_summary_markdown(
             transcript_text=transcript_text,
@@ -126,29 +143,29 @@ def summarize_transcript_with_chunking(
             cancel_event=cancel_event,
         )
 
-    # Немного i18n для промптов частичных summary
     lang = (language or "").lower()
     is_en = lang.startswith("en")
 
     mini_summaries: List[str] = []
 
+    # --- mini summaries ---
     for idx, chunk in enumerate(chunks, start=1):
         _check_cancel(cancel_event)
 
         if is_en:
             part_header = (
                 f"This is part {idx} of {len(chunks)} of a long meeting transcript. "
-                "Create a concise summary only for THIS part, preserving the meaning."
+                "Generate a concise summary **ONLY for this part**."
             )
-            prefix_title = f"### Part {idx}\n\n"
+            part_title = f"### Part {idx}\n\n"
         else:
             part_header = (
-                f"Это часть {idx} из {len(chunks)} транскрипта длинной встречи. "
-                "Сделай краткое summary только по этой части, сохраняя смысл."
+                f"Это часть {idx} из {len(chunks)} длинной встречи. "
+                "Сформируй краткое summary **только по этой части**."
             )
-            prefix_title = f"### Часть {idx}\n\n"
+            part_title = f"### Часть {idx}\n\n"
 
-        part_text = f"{part_header}\n\n{chunk}"
+        part_text = part_header + "\n\n" + chunk
 
         mini_md = generate_llm_summary_markdown(
             transcript_text=part_text,
@@ -160,20 +177,20 @@ def summarize_transcript_with_chunking(
             cancel_event=cancel_event,
         )
 
-        mini_summaries.append(prefix_title + mini_md.strip())
+        mini_summaries.append(part_title + mini_md.strip())
 
-    # Финальное объединяющее summary
+    # --- merge stage ---
     if is_en:
         merge_intro = (
-            "Below are concise summaries of parts of a long meeting. "
-            "Combine them into a single final summary, avoid repetition, "
-            "preserve context and key decisions."
+            "Below are summaries of all parts of a long meeting. "
+            "Merge them into a **single final summary**, avoid repetition, "
+            "preserve context, decisions and structure."
         )
     else:
         merge_intro = (
-            "Ниже собраны краткие summary частей длинной встречи. "
-            "Собери единое финальное summary, избегая повтора и сохраняя контекст "
-            "и ключевые решения."
+            "Ниже приведены краткие summary частей встречи. "
+            "Объедини их в **одно итоговое summary**, избегая повторов, "
+            "сохранив контекст и ключевые решения."
         )
 
     merge_input = merge_intro + "\n\n" + "\n\n".join(mini_summaries)

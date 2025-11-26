@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+import sys
 
 
 def setup_logger(
@@ -16,9 +16,17 @@ def setup_logger(
 ) -> logging.Logger:
     """
     Создаёт логгер приложения:
-    - logs/app.log (ротация)
-    - опционально выводит в консоль
+    - файл с ротацией: logs/app.log
+    - опционально вывод в консоль
+    - безопасен при многократных вызовах (не плодит хендлеры)
     """
+
+    # Если приложение собрано в exe — консольного окна, как правило, нет,
+    # вывод в консоль тогда не особо нужен.
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        to_console = False
+
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "app.log"
 
@@ -26,9 +34,10 @@ def setup_logger(
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     logger.propagate = False
 
-    # чтобы не плодить хендлеры при повторном вызове
-    if logger.handlers:
-        return logger
+    # Если наш файловый хендлер уже есть — просто возвращаем логгер.
+    for h in logger.handlers:
+        if isinstance(h, RotatingFileHandler):
+            return logger
 
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | %(message)s",
@@ -36,7 +45,10 @@ def setup_logger(
     )
 
     file_handler = RotatingFileHandler(
-        log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logger.level)

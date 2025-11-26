@@ -5,6 +5,7 @@ import tempfile
 import time
 import traceback
 import re
+import unicodedata
 from threading import Event
 
 from .config import load_settings, PROJECT_ROOT
@@ -21,6 +22,15 @@ class ProcessingError(Exception):
 
 
 # --------- helpers for resolving paths ---------
+
+
+def _normalize_str_path(p: str | Path) -> str:
+    """
+    Нормализует путь в Unicode NFC и приводит к str.
+    Это помогает корректно работать с путями, где есть
+    не-латинские символы (китайские, диакритика и т.п.).
+    """
+    return unicodedata.normalize("NFC", str(p))
 
 
 def _search_in_bases(rel: Path) -> Path | None:
@@ -48,9 +58,9 @@ def resolve_whisper_model_path(model: str | None) -> Path:
 
     - поддерживает абсолютные пути;
     - пути относительно PROJECT_ROOT / PROJECT_ROOT/_internal / CWD;
-    - 'ggml-small.bin' -> ищем в models/, _internal/models/;
+    - 'ggml-small.bin' -> ищем рядом с приложением или в models/;
     - если путь пустой/битый — используем дефолт:
-      prompts/models/ggml-small.bin или первую .bin в models.
+      models/ggml-small.bin или первую .bin в models.
     """
     name = (model or "").strip()
     candidates: list[Path] = []
@@ -61,7 +71,7 @@ def resolve_whisper_model_path(model: str | None) -> Path:
         if raw.is_absolute():
             candidates.append(raw)
         else:
-            # как есть: models/ggml-small.bin, bin/что-нибудь и т.п.
+            # как есть: ggml-small.bin, models/ggml-small.bin, bin/что-нибудь и т.п.
             c = _search_in_bases(raw)
             if c:
                 candidates.append(c)
@@ -146,14 +156,79 @@ def resolve_whisper_binary_path(path: str | None) -> str:
 
     raw = Path(name)
     if raw.is_absolute() and raw.is_file():
-        return str(raw)
+        return _normalize_str_path(raw)
 
     c = _search_in_bases(raw)
     if c:
-        return str(c)
+        return _normalize_str_path(c)
 
     # не нашли — пусть subprocess попробует через PATH
-    return name
+    return _normalize_str_path(name)
+
+
+def resolve_ffmpeg_binary_path(path: str | None) -> str:
+    """
+    Резолвит путь к ffmpeg с приоритетом локальных бинарей над системными:
+
+    1) Абсолютный путь -> если файл есть, используем его.
+    2) Если есть слеши — ищем относительный путь через _search_in_bases.
+    3) Если имя без слешей (например, 'ffmpeg'):
+       - сначала ищем PROJECT_ROOT/bin/ffmpeg(.exe),
+         PROJECT_ROOT/_internal/bin/ffmpeg(.exe), CWD/bin/ffmpeg(.exe);
+       - затем пробуем ffmpeg в PATH;
+       - в крайнем случае возвращаем исходную строку.
+    """
+    name = (path or "").strip() or "ffmpeg"
+    raw = Path(name)
+
+    # абсолютный
+    if raw.is_absolute() and raw.is_file():
+        return _normalize_str_path(raw)
+
+    # относительный с поддиректориями (bin/ffmpeg и т.п.)
+    if any(sep in name for sep in ("/", "\\")):
+        c = _search_in_bases(raw)
+        if c:
+            return _normalize_str_path(c)
+        if raw.is_file():
+            return _normalize_str_path(raw)
+
+    # имя без слешей — ищем в bin рядом с приложением / _internal / CWD
+    bases = [PROJECT_ROOT, PROJECT_ROOT / "_internal", Path.cwd()]
+    candidates: list[Path] = []
+    for base in bases:
+        # без расширения (на случай *nix)
+        candidates.append(base / "bin" / name)
+        # и .exe (типичный случай для Windows)
+        candidates.append(base / "bin" / f"{name}.exe")
+        # вдруг пользователь положил прямо рядом без bin
+        candidates.append(base / name)
+        candidates.append(base / f"{name}.exe")
+
+    for c in candidates:
+        if c.is_file():
+            return _normalize_str_path(c)
+
+    # PATH как запасной вариант
+    found = shutil.which(name)
+    if found:
+        return _normalize_str_path(found)
+
+    # крайний случай — как есть
+    return _normalize_str_path(name)
+
+
+# --------- helpers для "опасных" путей ---------
+
+
+def _has_risky_chars(path: Path) -> bool:
+    """
+    Проверяем, есть ли в полном пути символы вне базового ASCII.
+    Это эвристика: такие пути потенциально плохо переживаются
+    внешними CLI-инструментами (ffmpeg/whisper-cli) на Windows.
+    """
+    s = _normalize_str_path(path)
+    return any(ord(ch) > 127 for ch in s)
 
 
 def _unique_path(base_path: Path) -> Path:
@@ -236,10 +311,23 @@ def process_video(
     logger.info("Start processing: %s", video_path)
     report("start", stage_percents["start"], f"Processing {video_path.name}")
 
+    # Ранний и понятный фейл для «сложных» путей
+    if _has_risky_chars(video_path):
+        msg = (
+            "Путь к файлу содержит символы вне базового ASCII "
+            "(например, иероглифы или специальные символы).\n\n"
+            "Сейчас приложение не умеет надёжно передавать такие пути во внешние "
+            "утилиты ffmpeg/whisper.\n\n"
+            "Пожалуйста, переместите или переименуйте файл так, чтобы полный путь "
+            "содержал только латиницу, цифры, пробелы и символы .-_ и попробуйте снова."
+        )
+        logger.error("%s Path: %s", msg.replace("\n", " "), video_path)
+        raise ProcessingError(msg)
+
     settings = load_settings()
 
-    ffmpeg_path = settings["ffmpeg_path"]
-    whisper_path_raw = settings["whisper_path"]
+    ffmpeg_raw = settings.get("ffmpeg_path", "ffmpeg")
+    whisper_path_raw = settings.get("whisper_path", "bin/whisper-cli.exe")
     whisper_model_raw = settings.get("whisper_model", "models/ggml-small.bin")
     temp_dir_setting = settings.get("temp_dir")
 
@@ -258,6 +346,7 @@ def process_video(
         fmt = "md"
 
     # Резолвим реальные пути
+    ffmpeg_path = resolve_ffmpeg_binary_path(ffmpeg_raw)
     whisper_path = resolve_whisper_binary_path(whisper_path_raw)
     model_path = resolve_whisper_model_path(whisper_model_raw)
     prompt_path = resolve_prompt_path(summary_prompt_raw)
@@ -266,12 +355,14 @@ def process_video(
         "Settings:"
         " whisper_model_raw=%s, model_path=%s,"
         " whisper_path_raw=%s, whisper_path_resolved=%s,"
-        " ffmpeg_path=%s, llm_model=%s,"
+        " ffmpeg_raw=%s, ffmpeg_resolved=%s,"
+        " llm_model=%s,"
         " chunk_threshold=%s, chunk_size=%s, overlap=%s,"
         " summary_format=%s, prompt_path=%s",
         whisper_model_raw, model_path,
         whisper_path_raw, whisper_path,
-        ffmpeg_path, openrouter_model,
+        ffmpeg_raw, ffmpeg_path,
+        openrouter_model,
         long_threshold_words, max_words_per_chunk, overlap_words,
         fmt, prompt_path,
     )
@@ -338,7 +429,8 @@ def process_video(
             report("summary", -1, "Generating summary with LLM")
             t_sum = time.time()
 
-            text = transcript_tmp.read_text(encoding="utf-8", errors="ignore")
+            # Важно: errors="replace" вместо "ignore", чтобы не терять текст
+            text = transcript_tmp.read_text(encoding="utf-8", errors="replace")
             words = text.split()
 
             if len(words) > long_threshold_words:

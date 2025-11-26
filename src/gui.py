@@ -94,6 +94,11 @@ I18N = {
         "status_done_prefix": "Done",
 
         "elapsed": "Elapsed:",
+
+        "no_api_key_for_summary": "To generate a summary you need to specify an API key.",
+        "generic_error_transcript_saved": (
+            "An error occurred, but the transcript has been saved to:\n{path}"
+        ),
     },
     "ru": {
         "title": "Meeting Notes",
@@ -162,6 +167,11 @@ I18N = {
         "status_done_prefix": "Готово",
 
         "elapsed": "Прошло:",
+
+        "no_api_key_for_summary": "Для генерации summary нужно указать API ключ.",
+        "generic_error_transcript_saved": (
+            "Произошла ошибка, но транскрипт сохранён по пути:\n{path}"
+        ),
     }
 }
 
@@ -237,6 +247,7 @@ class MeetingNotesGUI(ttk.Window):
         self.is_running = False
 
         self.stage_ranges = {
+            "test_llm": (0, 5),
             "extract_audio": (5, 25),
             "transcribe": (25, 70),
             "summary": (70, 90),
@@ -269,6 +280,9 @@ class MeetingNotesGUI(ttk.Window):
         if raw_key.lower() == "none":
             raw_key = ""
         self.api_key_var = tk.StringVar(value=raw_key)
+
+        # последний успешно проверенный ключ LLM (в рамках текущего запуска)
+        self._last_llm_key_checked: str | None = self.api_key_var.get().strip() or None
 
         self.whisper_model_var = tk.StringVar(
             value=str(self.settings.get("whisper_model", "ggml-small.bin"))
@@ -432,11 +446,8 @@ class MeetingNotesGUI(ttk.Window):
         """
 
         def on_ctrl_key(event):
-            # На Windows keycode для букв стабилен, независимо от раскладки:
-            # A/Ф = 65, C/С = 67, X/Ч = 88, V/М = 86
             kc = event.keycode
 
-            # Для Windows делаем привязку по keycode
             if sys.platform.startswith("win"):
                 if kc == 65:  # A / Ф
                     entry.selection_range(0, tk.END)
@@ -457,7 +468,6 @@ class MeetingNotesGUI(ttk.Window):
 
                 return None
 
-            # На других платформах оставляем простую привязку по keysym (EN)
             ks = event.keysym
             if ks in ("a", "A"):
                 entry.selection_range(0, tk.END)
@@ -478,16 +488,21 @@ class MeetingNotesGUI(ttk.Window):
 
             return None
 
-        # Один обработчик для всех Ctrl+клавиш
         entry.bind("<Control-KeyPress>", on_ctrl_key)
-
-        # Контекстное меню по правому клику
         entry.bind("<Button-3>", lambda e, ent=entry: self._show_entry_context_menu(ent, e))
+
+    def _show_entry_context_menu(self, entry: tk.Entry, event):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Copy", command=lambda: entry.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: entry.event_generate("<<Paste>>"))
+        menu.add_command(label="Cut", command=lambda: entry.event_generate("<<Cut>>"))
+        menu.add_separator()
+        menu.add_command(label="Select All", command=lambda: (entry.selection_range(0, tk.END), entry.icursor(tk.END)))
+        menu.tk_popup(event.x_root, event.y_root)
 
     # ---------------- titlebar actions ----------------
 
     def _on_close(self):
-        # При закрытии сохраняем настройки (в том числе API ключ)
         try:
             self._persist_settings()
         except Exception:
@@ -518,7 +533,6 @@ class MeetingNotesGUI(ttk.Window):
             self.titlebar = ttk.Frame(self, style="Titlebar.TFrame")
             self.titlebar.pack(fill=X)
 
-            # Иконка слева от названия (если есть png)
             if getattr(self, "_titlebar_icon_img", None):
                 self.title_icon_lbl = ttk.Label(
                     self.titlebar,
@@ -532,7 +546,6 @@ class MeetingNotesGUI(ttk.Window):
 
             ttk.Frame(self.titlebar).pack(side=LEFT, fill=X, expand=True)
 
-            # Порядок справа налево как в Windows: Закрыть, Развернуть, Свернуть
             self.close_btn = ttk.Button(
                 self.titlebar, text="X", width=3, style="Titlebar.TButton",
                 command=self._on_close
@@ -551,7 +564,6 @@ class MeetingNotesGUI(ttk.Window):
             )
             self.min_btn.pack(side=RIGHT, padx=(2, 0), ipady=2)
 
-            # Перетаскивание окна мышью
             self._drag_start_x = 0
             self._drag_start_y = 0
 
@@ -579,7 +591,6 @@ class MeetingNotesGUI(ttk.Window):
 
             self.titlebar.bind("<Double-Button-1>", lambda e: self._on_toggle_maximize())
 
-        # scrollable container
         if ScrolledFrame:
             self.container = ScrolledFrame(self, autohide=True, padding=14)
             self.container.pack(fill=BOTH, expand=True)
@@ -647,7 +658,6 @@ class MeetingNotesGUI(ttk.Window):
         self.api_key_lbl = ttk.Label(self.api_row, text="")
         self.api_key_lbl.pack(side=LEFT)
 
-        # tk.Entry вместо ttk.Entry, плюс автосохранение при уходе с фокуса
         self.api_key_entry = tk.Entry(
             self.api_row,
             textvariable=self.api_key_var,
@@ -655,11 +665,7 @@ class MeetingNotesGUI(ttk.Window):
             show="*"
         )
         self.api_key_entry.pack(side=LEFT, padx=(6, 0))
-
-        # Автосохранение при уходе с поля
         self.api_key_entry.bind("<FocusOut>", lambda e: self._persist_settings())
-
-        # Шорткаты и контекстное меню (Ctrl+C / Ctrl+V / меню по правому клику)
         self._bind_entry_shortcuts(self.api_key_entry)
 
         self.api_key_toggle_btn = ttk.Button(
@@ -860,7 +866,6 @@ class MeetingNotesGUI(ttk.Window):
         )
         self.overlap_spin.pack(side=LEFT, padx=6)
 
-        # Sizegrip для ресайза
         if self._use_custom_titlebar:
             self.sizegrip = ttk.Sizegrip(self)
             self.sizegrip.place(relx=1.0, rely=1.0, anchor="se")
@@ -875,7 +880,6 @@ class MeetingNotesGUI(ttk.Window):
         selected = self.ui_lang_combo.get().strip().upper()
         self.ui_lang_var.set("ru" if selected == "RU" else "en")
 
-        # Авто-синк языка транскрипции с UI, пока пользователь не менял вручную
         if not self._lang_user_overridden:
             self.lang_var.set("ru" if self.ui_lang_var.get() == "ru" else "en")
 
@@ -891,7 +895,6 @@ class MeetingNotesGUI(ttk.Window):
         elif raw == "en":
             self.lang_var.set("en")
 
-        # Пользователь тронул руками - больше не перетираем при смене UI
         self._lang_user_overridden = True
 
     def _refresh_lang_combo(self):
@@ -985,11 +988,6 @@ class MeetingNotesGUI(ttk.Window):
     # ---------------- enable/disable controls when running ----------------
 
     def _set_controls_running(self, running: bool):
-        """
-        Лочим/разлочиваем элементы управления во время обработки.
-        Пока идёт пайплайн — пользователь не может менять настройки,
-        выбирать файл и жать лишние кнопки. Доступна только Cancel.
-        """
         if running:
             main_state = DISABLED
             adv_state = DISABLED
@@ -999,38 +997,29 @@ class MeetingNotesGUI(ttk.Window):
             adv_state = NORMAL
             combo_state = "readonly"
 
-        # верх: язык UI
         self.ui_lang_combo.config(state=combo_state)
 
-        # файл
         self.file_entry.config(state=main_state)
         self.browse_btn.config(state=main_state)
 
-        # выходы
         self.summary_cb.config(state=main_state)
         self.transcript_cb.config(state=main_state)
 
-        # API / summary
         self.api_key_entry.config(state=main_state)
         self.api_key_toggle_btn.config(state=main_state)
         self.test_llm_btn.config(state=main_state)
 
         self.summary_format_combo.config(state=combo_state)
 
-        # язык транскрипции
         self.lang_combo.config(state=combo_state)
 
-        # кнопки
         self.start_btn.config(state=DISABLED if running else NORMAL)
         self.cancel_btn.config(state=NORMAL if running else DISABLED)
         if running:
-            # Открытие папки неактивно во время обработки
             self.open_folder_btn.config(state=DISABLED)
 
-        # переключатель advanced
         self.adv_toggle.config(state=main_state)
 
-        # advanced-поля
         self.whisper_entry.config(state=adv_state)
         self.whisper_browse_btn.config(state=adv_state)
         self.models_open_btn.config(state=adv_state)
@@ -1041,14 +1030,12 @@ class MeetingNotesGUI(ttk.Window):
         self.prompt_browse_btn.config(state=adv_state)
         self.prompt_edit_btn.config(state=adv_state)
 
-        # спинбоксы
         try:
             self.max_tokens_spin.config(state=adv_state)
             self.threshold_spin.config(state=adv_state)
             self.chunk_size_spin.config(state=adv_state)
             self.overlap_spin.config(state=adv_state)
         except Exception:
-            # На случай, если что-то не инициализировалось — не падаем.
             pass
 
     # ---------------- summary-dependent visibility ----------------
@@ -1184,7 +1171,7 @@ class MeetingNotesGUI(ttk.Window):
             return
 
         self.test_llm_btn.config(state=DISABLED)
-        self.status_var.set(self._t("status_testing_llm"))
+        self._start_test_llm_progress()
 
         def worker():
             try:
@@ -1221,6 +1208,8 @@ class MeetingNotesGUI(ttk.Window):
                     temperature=0,
                 )
 
+                # успешный тест — запоминаем ключ как проверенный
+                self.after(0, lambda: setattr(self, "_last_llm_key_checked", api_key))
                 self.after(0, lambda: messagebox.showinfo(self._t("done_title"), reply))
 
             except Exception as e:
@@ -1231,6 +1220,9 @@ class MeetingNotesGUI(ttk.Window):
                 ))
             finally:
                 self.after(0, lambda: self.test_llm_btn.config(state=NORMAL))
+                self.after(0, self._stop_progress_pulse)
+                self.after(0, self._stop_pseudo_progress)
+                self.after(0, lambda: self.progress_var.set(0))
                 self.after(0, lambda: self.status_var.set(self._t("status_idle")))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1238,14 +1230,19 @@ class MeetingNotesGUI(ttk.Window):
     def on_start(self):
         media = self.file_path.get().strip()
         if not media:
-            messagebox.showwarning("No file", self._t("no_file"))
+            messagebox.showwarning(self._t("error_title"), self._t("no_file"))
             return
 
         if not self.summary_var.get() and not self.transcript_var.get():
-            messagebox.showwarning("No output", self._t("no_output"))
+            messagebox.showwarning(self._t("error_title"), self._t("no_output"))
             return
 
-        # Сохраняем настройки (включая текущий API ключ) перед запуском пайплайна
+        # Проверка: нельзя запускать summary без API-ключа
+        if self.summary_var.get() and not self.api_key_var.get().strip():
+            messagebox.showwarning(self._t("error_title"), self._t("no_api_key_for_summary"))
+            return
+
+        # Сохраняем настройки перед запуском пайплайна
         self._persist_settings()
 
         self.cancel_event.clear()
@@ -1261,7 +1258,6 @@ class MeetingNotesGUI(ttk.Window):
         self._start_timer()
         self.elapsed_row.pack(fill=X, pady=(4, 0))
 
-        # Лочим все настройки до окончания обработки
         self._set_controls_running(True)
 
         def progress_cb(stage: str, percent: int, message: str):
@@ -1270,21 +1266,68 @@ class MeetingNotesGUI(ttk.Window):
 
         reporter = ProgressReporter(progress_cb)
 
+        # Снимок значений на момент старта (чтобы не читать tk-переменные из потока)
+        summary_enabled = self.summary_var.get()
+        transcript_enabled = self.transcript_var.get()
+        api_key = self.api_key_var.get().strip()
+        llm_model = (self.llm_model_var.get().strip()
+                     or self.settings.get("openrouter_model", "openai/gpt-4.1-mini"))
+        lang_value = None if self.lang_var.get() == "auto" else self.lang_var.get()
+        summary_format_value = self.summary_format_var.get().strip() or "md"
+
         def worker():
             try:
                 from src.pipeline import process_video, ProcessingError
+                from src.summarizer import call_openrouter_chat
 
-                lang = None if self.lang_var.get() == "auto" else self.lang_var.get()
+                # --- health-check LLM при изменённом ключе ---
+                if summary_enabled and api_key:
+                    last = getattr(self, "_last_llm_key_checked", None)
+                    if api_key != last:
+                        # Отдельный этап "Testing LLM..." в прогрессе
+                        self.after(0, self._start_test_llm_progress)
+                        try:
+                            ui_lang = self.ui_lang_var.get()
+                            if ui_lang == "ru":
+                                prompt = "Короткий тест доступности. Ответь одним словом: OK"
+                            else:
+                                prompt = "Short connectivity test. Reply with a single word: OK"
 
+                            call_openrouter_chat(
+                                api_key=api_key,
+                                model=llm_model,
+                                messages=[
+                                    {"role": "system", "content": "You are a health check endpoint."},
+                                    {"role": "user", "content": prompt},
+                                ],
+                                max_tokens=32,
+                                temperature=0,
+                            )
+
+                            # успешно — помечаем ключ как проверенный
+                            self._last_llm_key_checked = api_key
+
+                        except Exception as e:
+                            err_msg = self._t("test_llm_fail").format(error=str(e))
+                            self.after(0, lambda m=err_msg: self._on_error(m))
+                            return
+                        finally:
+                            # после health-check сбрасываем индикатор, дальше пайплайн сам рисует прогресс
+                            self.after(0, self._stop_progress_pulse)
+                            self.after(0, self._stop_pseudo_progress)
+                            self.after(0, lambda: self.progress_var.set(0))
+                            self.after(0, lambda: self.status_var.set(self._t("status_starting")))
+
+                # --- основной пайплайн ---
                 result_path = process_video(
                     video_path=Path(media),
-                    language=lang,
+                    language=lang_value,
                     keep_temp=False,
-                    summary_only=self.summary_var.get(),
-                    with_transcript=self.transcript_var.get(),
+                    summary_only=summary_enabled,
+                    with_transcript=transcript_enabled,
                     progress=reporter,
                     cancel_event=self.cancel_event,
-                    summary_format=self.summary_format_var.get(),
+                    summary_format=summary_format_value,
                 )
 
                 self.after(0, lambda rp=result_path: self._on_done(rp))
@@ -1299,6 +1342,10 @@ class MeetingNotesGUI(ttk.Window):
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- progress + timer ----------------
+
+    def _start_test_llm_progress(self):
+        self._last_stage = "test_llm"
+        self._update_progress(-1, self._t("status_testing_llm"))
 
     def _update_progress(self, percent: int, message: str):
         if percent < 0:
@@ -1401,7 +1448,26 @@ class MeetingNotesGUI(ttk.Window):
         self._stop_timer()
         self.elapsed_row.pack_forget()
         self._set_controls_running(False)
-        messagebox.showerror(self._t("error_title"), msg)
+
+        friendly_msg = msg
+
+        # Если в сообщении есть пометка о сохранённом транскрипте,
+        # показываем более дружелюбный текст с путём.
+        marker = "Transcript saved to:"
+        if marker in msg:
+            try:
+                after = msg.split(marker, 1)[1].strip()
+                # убираем возможные скобки/пробелы
+                after = after.strip(" )(")
+                transcript_path = after
+                if transcript_path:
+                    friendly_msg = self._t("generic_error_transcript_saved").format(
+                        path=transcript_path
+                    )
+            except Exception:
+                pass
+
+        messagebox.showerror(self._t("error_title"), friendly_msg)
 
     # ---------------- settings persistence ----------------
 
@@ -1432,8 +1498,34 @@ class MeetingNotesGUI(ttk.Window):
 
 
 def main():
-    app = MeetingNotesGUI()
-    app.mainloop()
+    try:
+        app = MeetingNotesGUI()
+        app.mainloop()
+    except Exception:
+        import traceback
+        import datetime
+        import tkinter as tk
+        from tkinter import messagebox
+
+        try:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_path = PROJECT_ROOT / "meeting-notes-error.log"
+
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n[{ts}] Startup error:\n")
+                f.write(traceback.format_exc())
+                f.write("\n")
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "Startup error",
+                f"Unexpected error on startup.\n"
+                f"Log saved to:\n{log_path}"
+            )
+            root.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

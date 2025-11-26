@@ -5,6 +5,7 @@ import tempfile
 import time
 from threading import Event
 from collections import deque
+import unicodedata
 import sys
 
 
@@ -16,6 +17,14 @@ class AudioExtractionError(Exception):
 AUDIO_EXTENSIONS = {
     ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus",
 }
+
+
+def _norm(p: str | Path) -> str:
+    """
+    NFD/NFC нормализация пути + приведение к str.
+    Защита от путей с нестандартными символами.
+    """
+    return unicodedata.normalize("NFC", str(p))
 
 
 def is_audio_file(path: Path) -> bool:
@@ -34,6 +43,10 @@ def extract_audio(
     Возвращает путь к временному аудиофайлу.
     Отслеживает cancel_event и останавливает ffmpeg при отмене.
     """
+
+    # нормализация пути входного файла
+    video_path = Path(_norm(video_path)).resolve()
+
     if not video_path.is_file():
         raise AudioExtractionError(f"Файл не найден: {video_path}")
 
@@ -41,20 +54,23 @@ def extract_audio(
     if temp_dir is None:
         tmp_dir = Path(tempfile.mkdtemp(prefix="meeting_notes_"))
     else:
-        tmp_dir = temp_dir
+        tmp_dir = Path(temp_dir)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = tmp_dir / (video_path.stem + "_audio.wav")
+    # путь к WAV
+    audio_path = tmp_dir / f"{video_path.stem}_audio.wav"
+    audio_path_str = _norm(audio_path)
 
+    # команда ffmpeg
     cmd = [
-        ffmpeg_path,
+        _norm(ffmpeg_path),
         "-y",
-        "-i", str(video_path),
+        "-i", _norm(video_path),
         "-ac", "1",
         "-ar", "16000",
         "-af", "loudnorm",
         "-vn",
-        str(audio_path),
+        audio_path_str,
     ]
 
     # базовые параметры Popen
@@ -66,13 +82,14 @@ def extract_audio(
         universal_newlines=True,
     )
 
-    # на Windows скрываем консольное окно ffmpeg
+    # скрыть окно консоли ffmpeg на Windows
     if sys.platform.startswith("win"):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         popen_kwargs["startupinfo"] = startupinfo
         popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+    # запуск ffmpeg
     try:
         process = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
@@ -83,16 +100,19 @@ def extract_audio(
 
     last_lines: deque[str] = deque(maxlen=40)
 
+    # цикл чтения stderr
     try:
         assert process.stderr is not None
 
-        # основной цикл чтения stderr
         while True:
             line = process.stderr.readline()
-            if line:
-                last_lines.append(line.rstrip())
 
-            # проверка отмены
+            if line:
+                # иногда ffmpeg выводит строку в неверной кодировке → заменяем
+                safe_line = line.rstrip("\n").encode("utf-8", "replace").decode("utf-8", "replace")
+                last_lines.append(safe_line)
+
+            # Проверка отмены
             if cancel_event and cancel_event.is_set():
                 process.terminate()
                 try:
@@ -117,7 +137,7 @@ def extract_audio(
         except Exception:
             pass
 
-    # проверяем успешность
+    # проверка успешности
     if process.returncode != 0 or not audio_path.is_file():
         tail = "\n".join(last_lines)
         raise AudioExtractionError(
