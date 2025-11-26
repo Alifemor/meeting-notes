@@ -1,5 +1,8 @@
 # Meeting Notes
 
+## Версия
+**v0.9.0-beta**
+
 **Meeting Notes** — локальное настольное приложение для транскрибации рабочих встреч, интервью и обсуждений с возможностью генерации summary.  
 
 Транскрибация выполняется **полностью локально**.  
@@ -47,7 +50,7 @@ MeetingNotes.exe
 В дистрибутив входят:
 - `bin/ffmpeg.exe`
 - `bin/whisper-cli.exe`
-- стандартная модель whisper (в сборку добавлена ggml-small.bin)  
+- стандартные модели whisper (в сборку добавлены ggml-small.bin / ggml-base.bin)  
 - дефолтный prompt (`prompts/summary_default.txt`)
 
 ---
@@ -135,6 +138,7 @@ python -m src.cli "video.mp4" --lang ru
 python -m src.cli "video.mp4" --summary
 python -m src.cli "video.mp4" --summary --with-transcript
 python -m src.cli "video.mp4" --model models/ggml-base.bin
+python -m src.cli "video.mp4" --model models/ggml-small.bin
 ```
 
 ---
@@ -142,6 +146,7 @@ python -m src.cli "video.mp4" --model models/ggml-base.bin
 ## Ограничения
 
 - Скорость транскрипции зависит от процессора.  
+- Для слабых ПК рекомендуется сменить модель на ggml-small.bin 
 - Whisper-модели занимают от 50 МБ до 3 ГБ.  
 - Для summary требуется API-ключ LLM-провайдера.
 

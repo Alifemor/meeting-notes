@@ -5,7 +5,7 @@ a = Analysis(
     ['src\\gui.py'],
     pathex=[],
     binaries=[('bin\\ffmpeg.exe', 'bin'), ('bin\\whisper-cli.exe', 'bin'), ('bin\\ggml.dll', 'bin'), ('bin\\ggml-base.dll', 'bin'), ('bin\\ggml-cpu.dll', 'bin'), ('bin\\SDL2.dll', 'bin'), ('bin\\whisper.dll', 'bin')],
-    datas=[('models\\ggml-small.bin', 'models'), ('prompts\\summary_default.txt', 'prompts'), ('assets\\app.png', 'assets'), ('assets\\app.ico', 'assets'), ('settings.json', '.'), ('settings_user.json', '.'), ('README.md', '.')],
+    datas=[('models\\ggml-small.bin', 'models'), ('models\\ggml-base.bin', 'models'), ('prompts\\summary_default.txt', 'prompts'), ('assets\\app.png', 'assets'), ('assets\\app.ico', 'assets'), ('settings.json', '.'), ('settings_user.json', '.'), ('README.md', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
